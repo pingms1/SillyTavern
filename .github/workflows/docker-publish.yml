@@ -21,34 +21,37 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'SillyTavern/SillyTavern'
     runs-on: ubuntu-latest
 
     steps:
-      ## Workaround for GitHub repo names containing uppercase characters
+      # Workaround for GitHub repo names containing uppercase characters
       - name: Set lowercase repo name
         run: |
-          echo "IMAGE_NAME=${REPO,,}" >>${GITHUB_ENV}
+          echo "IMAGE_NAME=${REPO,,}" >> ${GITHUB_ENV}
 
-      # Using the following workaround because currently GitHub Actions 
+      # Using the following workaround because currently GitHub Actions
       # does not support logical AND/OR operations on triggers
       # It's currently not possible to have `branches` under the `schedule` trigger
       - name: Checkout the release branch (on release)
-        if: ${{ github.event_name == 'release' }}
-        uses: actions/checkout@v3
-        with:
-          ref: "release"
-
-      - name: Checkout the release branch (on push)
-        if: ${{ github.event_name == 'push' }}
-        uses: actions/checkout@v3
+        if: ${{ github.event_name == 'release' || github.event_name == 'push' }}
+        uses: actions/checkout@v4.1.2
         with:
           ref: "release"
 
       - name: Checkout the staging branch
         if: ${{ github.event_name == 'schedule' }}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4.1.2
         with:
           ref: "staging"
+
+      # Get current branch name
+      # This is also part of the workaround for Actions not allowing logical
+      # AND/OR operators on triggers
+      # Otherwise the action triggered by schedule always has ref_name = release
+      - name: Get the current branch name
+        run: |
+          echo "BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)" >> ${GITHUB_ENV}
 
       # Setting up QEMU for multi-arch image build
       - name: Set up QEMU
@@ -62,7 +65,12 @@ jobs:
         id: metadata
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: ${{ github.ref_name }}
+          # Release version tag if the workflow is triggered by a release
+          # Branch name tag if the workflow is triggered by a push
+          # Latest tag if the branch is release and the workflow is triggered by a push
+          tags: |
+            ${{ github.event_name == 'release' && github.ref_name || env.BRANCH_NAME }}
+            ${{ github.event_name == 'push' && env.BRANCH_NAME == 'release' && 'latest' || '' }}
 
       # Login into package repository as the person who created the release
       - name: Log in to the Container registry
@@ -84,10 +92,3 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-
-      # If the workflow is triggered by a release, marks and push the image as such
-      - name: Docker tag latest and push
-        if: ${{ github.event_name == 'release' }}
-        run: |
-          docker tag $IMAGE_NAME:${{ github.ref_name }} $IMAGE_NAME:latest
-          docker push $IMAGE_NAME:latest

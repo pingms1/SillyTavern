@@ -9,9 +9,12 @@ import {
     saveBase64AsFile,
     PAGINATION_TEMPLATE,
     getBase64Async,
+    resetScrollHeight,
+    initScrollHeight,
 } from './utils.js';
 import { RA_CountCharTokens, humanizedDateTime, dragElement, favsToHotswap, getMessageTimeStamp } from './RossAscends-mods.js';
-import { loadMovingUIState, sortEntitiesList } from './power-user.js';
+import { power_user, loadMovingUIState, sortEntitiesList } from './power-user.js';
+import { debounce_timeout } from './constants.js';
 
 import {
     chat,
@@ -37,7 +40,6 @@ import {
     online_status,
     talkativeness_default,
     selectRightMenuWithAnimation,
-    default_ch_mes,
     deleteLastMessage,
     showSwipeButtons,
     hideSwipeButtons,
@@ -116,9 +118,9 @@ export const group_generation_mode = {
 
 const DEFAULT_AUTO_MODE_DELAY = 5;
 
-export const groupCandidatesFilter = new FilterHelper(debounce(printGroupCandidates, 100));
+export const groupCandidatesFilter = new FilterHelper(debounce(printGroupCandidates, debounce_timeout.quick));
 let autoModeWorker = null;
-const saveGroupDebounced = debounce(async (group, reload) => await _save(group, reload), 500);
+const saveGroupDebounced = debounce(async (group, reload) => await _save(group, reload), debounce_timeout.relaxed);
 
 function setAutoModeWorker() {
     clearInterval(autoModeWorker);
@@ -186,9 +188,7 @@ export async function getGroupChat(groupId, reload = false) {
 
     if (Array.isArray(data) && data.length) {
         data[0].is_group = true;
-        for (let key of data) {
-            chat.push(key);
-        }
+        chat.splice(0, chat.length, ...data);
         await printMessages();
     } else {
         sendSystemMessage(system_message_types.GROUP, '', { isSmallSys: true });
@@ -203,6 +203,12 @@ export async function getGroupChat(groupId, reload = false) {
                 }
 
                 const mes = await getFirstCharacterMessage(character);
+
+                // No first message
+                if (!(mes?.mes)) {
+                    continue;
+                }
+
                 chat.push(mes);
                 await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1));
                 addOneMessage(mes);
@@ -351,6 +357,46 @@ export function getGroupCharacterCards(groupId, characterId) {
         return null;
     }
 
+    /**
+     * Runs the macro engine on a text, with custom <FIELDNAME> replace
+     * @param {string} value Value to replace
+     * @param {string} fieldName Name of the field
+     * @param {string} characterName Name of the character
+     * @returns {string} Replaced text
+     * */
+    function customBaseChatReplace(value, fieldName, characterName) {
+        if (!value) {
+            return '';
+        }
+
+        // We should do the custom field name replacement first, and then run it through the normal macro engine with provided names
+        value = value.replace(/<FIELDNAME>/gi, fieldName);
+        return baseChatReplace(value.trim(), name1, characterName);
+    }
+
+    /**
+     * Prepares text with prefix/suffix for a character field
+     * @param {string} value Value to replace
+     * @param {string} characterName Name of the character
+     * @param {string} fieldName Name of the field
+     * @returns {string} Prepared text
+     * */
+    function replaceAndPrepareForJoin(value, characterName, fieldName) {
+        value = value.trim();
+        if (!value) {
+            return '';
+        }
+
+        // Prepare and replace prefixes
+        const prefix = customBaseChatReplace(group.generation_mode_join_prefix, fieldName, characterName);
+        const suffix = customBaseChatReplace(group.generation_mode_join_suffix, fieldName, characterName);
+        const separator = power_user.instruct.wrap ? '\n' : '';
+        // Also run the macro replacement on the actual content
+        value = customBaseChatReplace(value, fieldName, characterName);
+
+        return `${prefix ? prefix + separator : ''}${value}${suffix ? separator + suffix : ''}`;
+    }
+
     const scenarioOverride = chat_metadata['scenario'];
 
     let descriptions = [];
@@ -372,16 +418,16 @@ export function getGroupCharacterCards(groupId, characterId) {
             continue;
         }
 
-        descriptions.push(baseChatReplace(character.description.trim(), name1, character.name));
-        personalities.push(baseChatReplace(character.personality.trim(), name1, character.name));
-        scenarios.push(baseChatReplace(character.scenario.trim(), name1, character.name));
-        mesExamplesArray.push(baseChatReplace(character.mes_example.trim(), name1, character.name));
+        descriptions.push(replaceAndPrepareForJoin(character.description, character.name, 'Description'));
+        personalities.push(replaceAndPrepareForJoin(character.personality, character.name, 'Personality'));
+        scenarios.push(replaceAndPrepareForJoin(character.scenario, character.name, 'Scenario'));
+        mesExamplesArray.push(replaceAndPrepareForJoin(character.mes_example, character.name, 'Example Messages'));
     }
 
-    const description = descriptions.join('\n');
-    const personality = personalities.join('\n');
-    const scenario = scenarioOverride?.trim() || scenarios.join('\n');
-    const mesExamples = mesExamplesArray.join('\n');
+    const description = descriptions.filter(x => x.length).join('\n');
+    const personality = personalities.filter(x => x.length).join('\n');
+    const scenario = scenarioOverride?.trim() || scenarios.filter(x => x.length).join('\n');
+    const mesExamples = mesExamplesArray.filter(x => x.length).join('\n');
 
     return { description, personality, scenario, mesExamples };
 }
@@ -411,7 +457,7 @@ async function getFirstCharacterMessage(character) {
     mes['extra'] = { 'gen_id': Date.now() * Math.random() * 1000000 };
     mes['mes'] = messageText
         ? substituteParams(messageText.trim(), name1, character.name)
-        : default_ch_mes;
+        : '';
     mes['force_avatar'] =
         character.avatar != 'none'
             ? getThumbnailUrl('avatar', character.avatar)
@@ -596,7 +642,7 @@ function isValidImageUrl(url) {
     if (Object.keys(url).length === 0) {
         return false;
     }
-    return isDataURL(url) || (url && url.startsWith('user'));
+    return isDataURL(url) || (url && (url.startsWith('user') || url.startsWith('/user')));
 }
 
 function getGroupAvatar(group) {
@@ -747,7 +793,6 @@ async function generateGroupWrapper(by_auto_mode, type = null, params = {}) {
             }
         }
         else if (type === 'impersonate') {
-            $('#send_textarea').attr('disabled', true);
             activatedMembers = activateImpersonate(group.members);
         }
         else if (activationStrategy === group_activation_strategy.NATURAL) {
@@ -764,7 +809,7 @@ async function generateGroupWrapper(by_auto_mode, type = null, params = {}) {
             const bias = getBiasStrings(userInput, type);
             await sendMessageAsUser(userInput, bias.messageBias);
             await saveChatConditional();
-            $('#send_textarea').val('').trigger('input');
+            $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles:true }));
         }
 
         // now the real generation begins: cycle through every activated character
@@ -799,7 +844,6 @@ async function generateGroupWrapper(by_auto_mode, type = null, params = {}) {
         typingIndicator.hide();
 
         is_group_generating = false;
-        $('#send_textarea').attr('disabled', false);
         setSendButtonState(false);
         setCharacterId(undefined);
         setCharacterName('');
@@ -1093,6 +1137,8 @@ async function onGroupGenerationModeInput(e) {
         let _thisGroup = groups.find((x) => x.id == openGroupId);
         _thisGroup.generation_mode = Number(e.target.value);
         await editGroup(openGroupId, false, false);
+
+        toggleHiddenControls(_thisGroup);
     }
 }
 
@@ -1102,6 +1148,15 @@ async function onGroupAutoModeDelayInput(e) {
         _thisGroup.auto_mode_delay = Number(e.target.value);
         await editGroup(openGroupId, false, false);
         setAutoModeWorker();
+    }
+}
+
+async function onGroupGenerationModeTemplateInput(e) {
+    if (openGroupId) {
+        let _thisGroup = groups.find((x) => x.id == openGroupId);
+        const prop = $(e.target).attr('setting');
+        _thisGroup[prop] = String(e.target.value);
+        await editGroup(openGroupId, false, false);
     }
 }
 
@@ -1270,6 +1325,14 @@ async function onHideMutedSpritesClick(value) {
     }
 }
 
+function toggleHiddenControls(group, generationMode = null) {
+    const isJoin = [group_generation_mode.APPEND, group_generation_mode.APPEND_DISABLED].includes(generationMode ?? group?.generation_mode);
+    $('#rm_group_generation_mode_join_prefix').parent().toggle(isJoin);
+    $('#rm_group_generation_mode_join_suffix').parent().toggle(isJoin);
+    initScrollHeight($('#rm_group_generation_mode_join_prefix'));
+    initScrollHeight($('#rm_group_generation_mode_join_suffix'));
+}
+
 function select_group_chats(groupId, skipAnimation) {
     openGroupId = groupId;
     newGroupMembers = [];
@@ -1305,6 +1368,10 @@ function select_group_chats(groupId, skipAnimation) {
     $('#rm_group_hidemutedsprites').prop('checked', group && group.hideMutedSprites);
     $('#rm_group_automode_delay').val(group?.auto_mode_delay ?? DEFAULT_AUTO_MODE_DELAY);
 
+    $('#rm_group_generation_mode_join_prefix').val(group?.generation_mode_join_prefix ?? '').attr('setting', 'generation_mode_join_prefix');
+    $('#rm_group_generation_mode_join_suffix').val(group?.generation_mode_join_suffix ?? '').attr('setting', 'generation_mode_join_suffix');
+    toggleHiddenControls(group, generationMode);
+
     // bottom buttons
     if (openGroupId) {
         $('#rm_group_submit').hide();
@@ -1338,6 +1405,11 @@ function select_group_chats(groupId, skipAnimation) {
         $('#rm_group_automode_label').hide();
     }
 
+    // Toggle textbox sizes, as input events have not fired here
+    $('#rm_group_chats_block .autoSetHeight').each(element => {
+        resetScrollHeight(element);
+    });
+
     eventSource.emit('groupSelected', { detail: { id: openGroupId, group: group } });
 }
 
@@ -1351,6 +1423,10 @@ function select_group_chats(groupId, skipAnimation) {
  * @returns {Promise<void>} - A promise that resolves when the processing and upload is complete.
  */
 async function uploadGroupAvatar(event) {
+    if (!(event.target instanceof HTMLInputElement) || !event.target.files.length) {
+        return;
+    }
+
     const file = event.target.files[0];
 
     if (!file) {
@@ -1425,15 +1501,17 @@ async function onGroupActionClick(event) {
         const index = _thisGroup.disabled_members.indexOf(member.data('id'));
         if (index !== -1) {
             _thisGroup.disabled_members.splice(index, 1);
+            await editGroup(openGroupId, false, false);
         }
-        await editGroup(openGroupId, false, false);
     }
 
     if (action === 'disable') {
         member.addClass('disabled');
         const _thisGroup = groups.find(x => x.id === openGroupId);
-        _thisGroup.disabled_members.push(member.data('id'));
-        await editGroup(openGroupId, false, false);
+        if (!_thisGroup.disabled_members.includes(member.data('id'))) {
+            _thisGroup.disabled_members.push(member.data('id'));
+            await editGroup(openGroupId, false, false);
+        }
     }
 
     if (action === 'up' || action === 'down') {
@@ -1796,6 +1874,10 @@ function doCurMemberListPopout() {
 }
 
 jQuery(() => {
+    $(document).on('input', '#rm_group_chats_block .autoSetHeight', function () {
+        resetScrollHeight($(this));
+    });
+
     $(document).on('click', '.group_select', function () {
         const groupId = $(this).attr('chid') || $(this).attr('grid') || $(this).data('id');
         openGroupById(groupId);
@@ -1823,6 +1905,8 @@ jQuery(() => {
     $('#rm_group_activation_strategy').on('change', onGroupActivationStrategyInput);
     $('#rm_group_generation_mode').on('change', onGroupGenerationModeInput);
     $('#rm_group_automode_delay').on('input', onGroupAutoModeDelayInput);
+    $('#rm_group_generation_mode_join_prefix').on('input', onGroupGenerationModeTemplateInput);
+    $('#rm_group_generation_mode_join_suffix').on('input', onGroupGenerationModeTemplateInput);
     $('#group_avatar_button').on('input', uploadGroupAvatar);
     $('#rm_group_restore_avatar').on('click', restoreGroupAvatar);
     $(document).on('click', '.group_member .right_menu_button', onGroupActionClick);
