@@ -1,3 +1,5 @@
+import { DOMPurify, Bowser, slideToggle } from '../lib.js';
+
 import {
     characters,
     online_status,
@@ -16,8 +18,8 @@ import {
     eventSource,
     menu_type,
     substituteParams,
-    callPopup,
     sendTextareaMessage,
+    getSlideToggleOptions,
 } from '../script.js';
 
 import {
@@ -25,7 +27,6 @@ import {
     send_on_enter_options,
 } from './power-user.js';
 
-import { LoadLocal, SaveLocal, LoadLocalBool } from './f-localStorage.js';
 import { selected_group, is_group_generating, openGroupById } from './group-chats.js';
 import { getTagKeyForEntity, applyTagsOnCharacterSelect } from './tags.js';
 import {
@@ -38,15 +39,20 @@ import { getTokenCountAsync } from './tokenizers.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
 import { debounce_timeout } from './constants.js';
 
-import Bowser from '../lib/bowser.min.js';
+import { Popup } from './popup.js';
+import { accountStorage } from './util/AccountStorage.js';
+import { getCurrentUserHandle } from './user.js';
 
 var RPanelPin = document.getElementById('rm_button_panel_pin');
 var LPanelPin = document.getElementById('lm_button_panel_pin');
 var WIPanelPin = document.getElementById('WI_panel_pin');
 
 var RightNavPanel = document.getElementById('right-nav-panel');
+var RightNavDrawerIcon = document.getElementById('rightNavDrawerIcon');
 var LeftNavPanel = document.getElementById('left-nav-panel');
+var LeftNavDrawerIcon = document.getElementById('leftNavDrawerIcon');
 var WorldInfo = document.getElementById('WorldInfo');
+var WIDrawerIcon = document.getElementById('WIDrawerIcon');
 
 var SelectedCharacterTab = document.getElementById('rm_button_selected_ch');
 
@@ -56,22 +62,25 @@ let counterNonce = Date.now();
 
 const observerConfig = { childList: true, subtree: true };
 const countTokensDebounced = debounce(RA_CountCharTokens, debounce_timeout.relaxed);
+const countTokensShortDebounced = debounce(RA_CountCharTokens, debounce_timeout.short);
+const checkStatusDebounced = debounce(RA_checkOnlineStatus, debounce_timeout.short);
 
 const observer = new MutationObserver(function (mutations) {
     mutations.forEach(function (mutation) {
+        if (!(mutation.target instanceof HTMLElement)) {
+            return;
+        }
         if (mutation.target.classList.contains('online_status_text')) {
-            RA_checkOnlineStatus();
+            checkStatusDebounced();
         } else if (mutation.target.parentNode === SelectedCharacterTab) {
-            setTimeout(RA_CountCharTokens, 200);
+            countTokensShortDebounced();
         } else if (mutation.target.classList.contains('mes_text')) {
-            if (mutation.target instanceof HTMLElement) {
-                for (const element of mutation.target.getElementsByTagName('math')) {
-                    element.childNodes.forEach(function (child) {
-                        if (child.nodeType === Node.TEXT_NODE) {
-                            child.textContent = '';
-                        }
-                    });
-                }
+            for (const element of mutation.target.getElementsByTagName('math')) {
+                element.childNodes.forEach(function (child) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        child.textContent = '';
+                    }
+                });
             }
         }
     });
@@ -115,7 +124,7 @@ export function humanizeGenTime(total_gen_time) {
  */
 var parsedUA = null;
 
-function getParsedUA() {
+export function getParsedUA() {
     if (!parsedUA) {
         try {
             parsedUA = Bowser.parse(navigator.userAgent);
@@ -157,18 +166,15 @@ export function shouldSendOnEnter() {
 //Does not break old characters/chats, as the code just uses whatever timestamp exists in the chat.
 //New chats made with characters will use this new formatting.
 export function humanizedDateTime() {
-    let baseDate = new Date(Date.now());
-    let humanYear = baseDate.getFullYear();
-    let humanMonth = baseDate.getMonth() + 1;
-    let humanDate = baseDate.getDate();
-    let humanHour = (baseDate.getHours() < 10 ? '0' : '') + baseDate.getHours();
-    let humanMinute =
-        (baseDate.getMinutes() < 10 ? '0' : '') + baseDate.getMinutes();
-    let humanSecond =
-        (baseDate.getSeconds() < 10 ? '0' : '') + baseDate.getSeconds();
-    let HumanizedDateTime =
-        humanYear + '-' + humanMonth + '-' + humanDate + '@' + humanHour + 'h' + humanMinute + 'm' + humanSecond + 's';
-    return HumanizedDateTime;
+    const now = new Date(Date.now());
+    const dt = {
+        year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(),
+        hour: now.getHours(), minute: now.getMinutes(), second: now.getSeconds(),
+    };
+    for (const key in dt) {
+        dt[key] = dt[key].toString().padStart(2, '0');
+    }
+    return `${dt.year}-${dt.month}-${dt.day}@${dt.hour}h${dt.minute}m${dt.second}s`;
 }
 
 //this is a common format version to display a timestamp on each chat message
@@ -299,11 +305,11 @@ export async function favsToHotswap() {
 
     //helpful instruction message if no characters are favorited
     if (favs.length == 0) {
-        container.html(`<small><span><i class="fa-solid fa-star"></i>${DOMPurify.sanitize(container.attr('no_favs'))}</span></small>`);
+        container.html(`<small><span><i class="fa-solid fa-star"></i>&nbsp;${DOMPurify.sanitize(container.attr('no_favs'))}</span></small>`);
         return;
     }
 
-    buildAvatarList(container, favs, { selectable: true, highlightFavs: false });
+    buildAvatarList(container, favs, { interactable: true, highlightFavs: false });
 }
 
 //changes input bar and send button display depending on connection status
@@ -311,9 +317,10 @@ function RA_checkOnlineStatus() {
     if (online_status == 'no_connection') {
         const send_textarea = $('#send_textarea');
         send_textarea.attr('placeholder', send_textarea.attr('no_connection_text')); //Input bar placeholder tells users they are not connected
-        $('#send_form').addClass('no-connection'); //entire input form area is red when not connected
+        $('#send_form').addClass('no-connection');
         $('#send_but').addClass('displayNone'); //send button is hidden when not connected;
         $('#mes_continue').addClass('displayNone'); //continue button is hidden when not connected;
+        $('#mes_impersonate').addClass('displayNone'); //continue button is hidden when not connected;
         $('#API-status-top').removeClass('fa-plug');
         $('#API-status-top').addClass('fa-plug-circle-exclamation redOverlayGlow');
         connection_made = false;
@@ -330,6 +337,7 @@ function RA_checkOnlineStatus() {
             if (!is_send_press && !(selected_group && is_group_generating)) {
                 $('#send_but').removeClass('displayNone'); //on connect, send button shows
                 $('#mes_continue').removeClass('displayNone'); //continue button is shown when connected
+                $('#mes_impersonate').removeClass('displayNone'); //continue button is shown when connected
             }
         }
     }
@@ -360,6 +368,7 @@ function RA_autoconnect(PrevApi) {
                     || (textgen_settings.type === textgen_types.INFERMATICAI && secret_state[SECRET_KEYS.INFERMATICAI])
                     || (textgen_settings.type === textgen_types.DREAMGEN && secret_state[SECRET_KEYS.DREAMGEN])
                     || (textgen_settings.type === textgen_types.OPENROUTER && secret_state[SECRET_KEYS.OPENROUTER])
+                    || (textgen_settings.type === textgen_types.FEATHERLESS && secret_state[SECRET_KEYS.FEATHERLESS])
                 ) {
                     $('#api_button_textgenerationwebui').trigger('click');
                 }
@@ -379,6 +388,10 @@ function RA_autoconnect(PrevApi) {
                     || (secret_state[SECRET_KEYS.COHERE] && oai_settings.chat_completion_source == chat_completion_sources.COHERE)
                     || (secret_state[SECRET_KEYS.PERPLEXITY] && oai_settings.chat_completion_source == chat_completion_sources.PERPLEXITY)
                     || (secret_state[SECRET_KEYS.GROQ] && oai_settings.chat_completion_source == chat_completion_sources.GROQ)
+                    || (secret_state[SECRET_KEYS.ZEROONEAI] && oai_settings.chat_completion_source == chat_completion_sources.ZEROONEAI)
+                    || (secret_state[SECRET_KEYS.BLOCKENTROPY] && oai_settings.chat_completion_source == chat_completion_sources.BLOCKENTROPY)
+                    || (secret_state[SECRET_KEYS.NANOGPT] && oai_settings.chat_completion_source == chat_completion_sources.NANOGPT)
+                    || (secret_state[SECRET_KEYS.DEEPSEEK] && oai_settings.chat_completion_source == chat_completion_sources.DEEPSEEK)
                     || (isValidUrl(oai_settings.custom_url) && oai_settings.chat_completion_source == chat_completion_sources.CUSTOM)
                 ) {
                     $('#api_button_openai').trigger('click');
@@ -397,24 +410,26 @@ function RA_autoconnect(PrevApi) {
 function OpenNavPanels() {
     if (!isMobile()) {
         //auto-open R nav if locked and previously open
-        if (LoadLocalBool('NavLockOn') == true && LoadLocalBool('NavOpened') == true) {
+        if (accountStorage.getItem('NavLockOn') == 'true' && accountStorage.getItem('NavOpened') == 'true') {
             //console.log("RA -- clicking right nav to open");
             $('#rightNavDrawerIcon').click();
         }
 
         //auto-open L nav if locked and previously open
-        if (LoadLocalBool('LNavLockOn') == true && LoadLocalBool('LNavOpened') == true) {
+        if (accountStorage.getItem('LNavLockOn') == 'true' && accountStorage.getItem('LNavOpened') == 'true') {
             console.debug('RA -- clicking left nav to open');
             $('#leftNavDrawerIcon').click();
         }
 
         //auto-open WI if locked and previously open
-        if (LoadLocalBool('WINavLockOn') == true && LoadLocalBool('WINavOpened') == true) {
+        if (accountStorage.getItem('WINavLockOn') == 'true' && accountStorage.getItem('WINavOpened') == 'true') {
             console.debug('RA -- clicking WI to open');
             $('#WIDrawerIcon').click();
         }
     }
 }
+
+const getUserInputKey = () => getCurrentUserHandle() + '_userInput';
 
 function restoreUserInput() {
     if (!power_user.restore_user_input) {
@@ -422,7 +437,7 @@ function restoreUserInput() {
         return;
     }
 
-    const userInput = LoadLocal('userInput');
+    const userInput = localStorage.getItem(getUserInputKey());
     if (userInput) {
         $('#send_textarea').val(userInput)[0].dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -430,7 +445,8 @@ function restoreUserInput() {
 
 function saveUserInput() {
     const userInput = String($('#send_textarea').val());
-    SaveLocal('userInput', userInput);
+    localStorage.setItem(getUserInputKey(), userInput);
+    console.debug('User Input -- ', userInput);
 }
 const saveUserInputDebounced = debounce(saveUserInput);
 
@@ -476,8 +492,8 @@ export function dragElement(elmnt) {
         }
 
         const style = getComputedStyle(target);
-        height = parseInt(style.height)
-        width = parseInt(style.width)
+        height = parseInt(style.height);
+        width = parseInt(style.width);
         top = parseInt(style.top);
         left = parseInt(style.left);
         right = parseInt(style.right);
@@ -693,27 +709,22 @@ const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
  */
 function autoFitSendTextArea() {
     const originalScrollBottom = chatBlock.scrollHeight - (chatBlock.scrollTop + chatBlock.offsetHeight);
-    if (Math.ceil(sendTextArea.scrollHeight + 3) >= Math.floor(sendTextArea.offsetHeight)) {
-        // Needs to be pulled dynamically because it is affected by font size changes
-        const sendTextAreaMinHeight = window.getComputedStyle(sendTextArea).getPropertyValue('min-height');
-        sendTextArea.style.height = sendTextAreaMinHeight;
-    }
-    sendTextArea.style.height = sendTextArea.scrollHeight + 3 + 'px';
+
+    sendTextArea.style.height = '1px'; // Reset height to 1px to force recalculation of scrollHeight
+    const newHeight = sendTextArea.scrollHeight;
+    sendTextArea.style.height = `${newHeight}px`;
 
     if (!isFirefox) {
-        const newScrollTop = Math.round(chatBlock.scrollHeight - (chatBlock.offsetHeight + originalScrollBottom));
-        chatBlock.scrollTop = newScrollTop;
+        chatBlock.scrollTop = chatBlock.scrollHeight - (chatBlock.offsetHeight + originalScrollBottom);
     }
 }
-export const autoFitSendTextAreaDebounced = debounce(autoFitSendTextArea);
+export const autoFitSendTextAreaDebounced = debounce(autoFitSendTextArea, debounce_timeout.short);
 
 // ---------------------------------------------------
 
 export function initRossMods() {
     // initial status check
-    setTimeout(() => {
-        RA_checkOnlineStatus();
-    }, 100);
+    checkStatusDebounced();
 
     if (power_user.auto_load_chat) {
         RA_autoloadchat();
@@ -728,112 +739,124 @@ export function initRossMods() {
         setTimeout(() => RA_autoconnect(PrevAPI), 100);
     });
 
-    $('#api_button').click(function () { setTimeout(RA_checkOnlineStatus, 100); });
+    $('#api_button').on('click', () => checkStatusDebounced());
 
     //toggle pin class when lock toggle clicked
     $(RPanelPin).on('click', function () {
-        SaveLocal('NavLockOn', $(RPanelPin).prop('checked'));
+        accountStorage.setItem('NavLockOn', $(RPanelPin).prop('checked'));
         if ($(RPanelPin).prop('checked') == true) {
             //console.log('adding pin class to right nav');
             $(RightNavPanel).addClass('pinnedOpen');
+            $(RightNavDrawerIcon).addClass('drawerPinnedOpen');
         } else {
             //console.log('removing pin class from right nav');
             $(RightNavPanel).removeClass('pinnedOpen');
+            $(RightNavDrawerIcon).removeClass('drawerPinnedOpen');
 
             if ($(RightNavPanel).hasClass('openDrawer') && $('.openDrawer').length > 1) {
-                $(RightNavPanel).slideToggle(200, 'swing');
-                //$(rightNavDrawerIcon).toggleClass('openIcon closedIcon');
+                slideToggle(RightNavPanel, getSlideToggleOptions());
+                $(RightNavDrawerIcon).toggleClass('closedIcon openIcon');
                 $(RightNavPanel).toggleClass('openDrawer closedDrawer');
             }
         }
     });
     $(LPanelPin).on('click', function () {
-        SaveLocal('LNavLockOn', $(LPanelPin).prop('checked'));
+        accountStorage.setItem('LNavLockOn', $(LPanelPin).prop('checked'));
         if ($(LPanelPin).prop('checked') == true) {
             //console.log('adding pin class to Left nav');
             $(LeftNavPanel).addClass('pinnedOpen');
+            $(LeftNavDrawerIcon).addClass('drawerPinnedOpen');
         } else {
             //console.log('removing pin class from Left nav');
             $(LeftNavPanel).removeClass('pinnedOpen');
+            $(LeftNavDrawerIcon).removeClass('drawerPinnedOpen');
 
             if ($(LeftNavPanel).hasClass('openDrawer') && $('.openDrawer').length > 1) {
-                $(LeftNavPanel).slideToggle(200, 'swing');
-                //$(leftNavDrawerIcon).toggleClass('openIcon closedIcon');
+                slideToggle(LeftNavPanel, getSlideToggleOptions());
+                $(LeftNavDrawerIcon).toggleClass('closedIcon openIcon');
                 $(LeftNavPanel).toggleClass('openDrawer closedDrawer');
             }
         }
     });
 
     $(WIPanelPin).on('click', function () {
-        SaveLocal('WINavLockOn', $(WIPanelPin).prop('checked'));
+        accountStorage.setItem('WINavLockOn', $(WIPanelPin).prop('checked'));
         if ($(WIPanelPin).prop('checked') == true) {
             console.debug('adding pin class to WI');
             $(WorldInfo).addClass('pinnedOpen');
+            $(WIDrawerIcon).addClass('drawerPinnedOpen');
         } else {
             console.debug('removing pin class from WI');
             $(WorldInfo).removeClass('pinnedOpen');
+            $(WIDrawerIcon).removeClass('drawerPinnedOpen');
 
             if ($(WorldInfo).hasClass('openDrawer') && $('.openDrawer').length > 1) {
                 console.debug('closing WI after lock removal');
-                $(WorldInfo).slideToggle(200, 'swing');
-                //$(WorldInfoDrawerIcon).toggleClass('openIcon closedIcon');
+                slideToggle(WorldInfo, getSlideToggleOptions());
+                $(WIDrawerIcon).toggleClass('closedIcon openIcon');
                 $(WorldInfo).toggleClass('openDrawer closedDrawer');
             }
         }
     });
 
     // read the state of right Nav Lock and apply to rightnav classlist
-    $(RPanelPin).prop('checked', LoadLocalBool('NavLockOn'));
-    if (LoadLocalBool('NavLockOn') == true) {
+    $(RPanelPin).prop('checked', accountStorage.getItem('NavLockOn') == 'true');
+    if (accountStorage.getItem('NavLockOn') == 'true') {
         //console.log('setting pin class via local var');
         $(RightNavPanel).addClass('pinnedOpen');
+        $(RightNavDrawerIcon).addClass('drawerPinnedOpen');
     }
     if ($(RPanelPin).prop('checked')) {
         console.debug('setting pin class via checkbox state');
         $(RightNavPanel).addClass('pinnedOpen');
+        $(RightNavDrawerIcon).addClass('drawerPinnedOpen');
     }
     // read the state of left Nav Lock and apply to leftnav classlist
-    $(LPanelPin).prop('checked', LoadLocalBool('LNavLockOn'));
-    if (LoadLocalBool('LNavLockOn') == true) {
+    $(LPanelPin).prop('checked', accountStorage.getItem('LNavLockOn') === 'true');
+    if (accountStorage.getItem('LNavLockOn') == 'true') {
         //console.log('setting pin class via local var');
         $(LeftNavPanel).addClass('pinnedOpen');
+        $(LeftNavDrawerIcon).addClass('drawerPinnedOpen');
     }
     if ($(LPanelPin).prop('checked')) {
         console.debug('setting pin class via checkbox state');
         $(LeftNavPanel).addClass('pinnedOpen');
+        $(LeftNavDrawerIcon).addClass('drawerPinnedOpen');
     }
 
     // read the state of left Nav Lock and apply to leftnav classlist
-    $(WIPanelPin).prop('checked', LoadLocalBool('WINavLockOn'));
-    if (LoadLocalBool('WINavLockOn') == true) {
+    $(WIPanelPin).prop('checked', accountStorage.getItem('WINavLockOn') === 'true');
+    if (accountStorage.getItem('WINavLockOn') == 'true') {
         //console.log('setting pin class via local var');
         $(WorldInfo).addClass('pinnedOpen');
+        $(WIDrawerIcon).addClass('drawerPinnedOpen');
     }
 
     if ($(WIPanelPin).prop('checked')) {
         console.debug('setting pin class via checkbox state');
         $(WorldInfo).addClass('pinnedOpen');
+        $(WIDrawerIcon).addClass('drawerPinnedOpen');
     }
 
     //save state of Right nav being open or closed
     $('#rightNavDrawerIcon').on('click', function () {
         if (!$('#rightNavDrawerIcon').hasClass('openIcon')) {
-            SaveLocal('NavOpened', 'true');
-        } else { SaveLocal('NavOpened', 'false'); }
+            accountStorage.setItem('NavOpened', 'true');
+        } else { accountStorage.setItem('NavOpened', 'false'); }
     });
 
     //save state of Left nav being open or closed
     $('#leftNavDrawerIcon').on('click', function () {
         if (!$('#leftNavDrawerIcon').hasClass('openIcon')) {
-            SaveLocal('LNavOpened', 'true');
-        } else { SaveLocal('LNavOpened', 'false'); }
+            accountStorage.setItem('LNavOpened', 'true');
+        } else { accountStorage.setItem('LNavOpened', 'false'); }
     });
 
     //save state of Left nav being open or closed
     $('#WorldInfo').on('click', function () {
         if (!$('#WorldInfo').hasClass('openIcon')) {
-            SaveLocal('WINavOpened', 'true');
-        } else { SaveLocal('WINavOpened', 'false'); }
+            accountStorage.setItem('WINavOpened', 'true');
+        } else { accountStorage.setItem('WINavOpened', 'false'); }
     });
 
     var chatbarInFocus = false;
@@ -849,8 +872,8 @@ export function initRossMods() {
         OpenNavPanels();
     }, 300);
 
-    $(SelectedCharacterTab).click(function () { SaveLocal('SelectedNavTab', 'rm_button_selected_ch'); });
-    $('#rm_button_characters').click(function () { SaveLocal('SelectedNavTab', 'rm_button_characters'); });
+    $(SelectedCharacterTab).click(function () { accountStorage.setItem('SelectedNavTab', 'rm_button_selected_ch'); });
+    $('#rm_button_characters').click(function () { accountStorage.setItem('SelectedNavTab', 'rm_button_characters'); });
 
     // when a char is selected from the list, save them as the auto-load character for next page load
 
@@ -869,24 +892,66 @@ export function initRossMods() {
         saveSettingsDebounced();
     });
 
-    $(sendTextArea).on('input', () => {
-        if (sendTextArea.scrollHeight > sendTextArea.offsetHeight || sendTextArea.value === '') {
-            autoFitSendTextArea();
-        } else {
-            autoFitSendTextAreaDebounced();
-        }
+    const cssAutofit = CSS.supports('field-sizing', 'content');
+
+    if (cssAutofit) {
+        let lastHeight = chatBlock.offsetHeight;
+        const chatBlockResizeObserver = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                if (entry.target !== chatBlock) {
+                    continue;
+                }
+
+                const threshold = 1;
+                const newHeight = chatBlock.offsetHeight;
+                const deltaHeight = newHeight - lastHeight;
+                const isScrollAtBottom = Math.abs(chatBlock.scrollHeight - chatBlock.scrollTop - newHeight) <= threshold;
+
+                if (!isScrollAtBottom && Math.abs(deltaHeight) > threshold) {
+                    chatBlock.scrollTop -= deltaHeight;
+                }
+                lastHeight = newHeight;
+            }
+        });
+
+        chatBlockResizeObserver.observe(chatBlock);
+    }
+
+    sendTextArea.addEventListener('input', () => {
         saveUserInputDebounced();
+
+        if (cssAutofit) {
+            // Unset modifications made with a manual resize
+            sendTextArea.style.height = 'auto';
+            return;
+        }
+
+        const hasContent = sendTextArea.value !== '';
+        const fitsCurrentSize = sendTextArea.scrollHeight <= sendTextArea.offsetHeight;
+        const isScrollbarShown = sendTextArea.clientWidth < sendTextArea.offsetWidth;
+        const isHalfScreenHeight = sendTextArea.offsetHeight >= window.innerHeight / 2;
+        const needsDebounce = hasContent && (fitsCurrentSize || (isScrollbarShown && isHalfScreenHeight));
+        if (needsDebounce) autoFitSendTextAreaDebounced();
+        else autoFitSendTextArea();
     });
 
     restoreUserInput();
 
-    //Regenerate if user swipes on the last mesage in chat
-
+    // Swipe gestures (see: https://www.npmjs.com/package/swiped-events)
     document.addEventListener('swiped-left', function (e) {
         if (power_user.gestures === false) {
             return;
         }
-        if ($('.mes_edit_buttons, .drawer-content, #character_popup, #dialogue_popup, #WorldInfo, #right-nav-panel, #left-nav-panel, #select_chat_popup, #floatingPrompt').is(':visible')) {
+        if (Popup.util.isPopupOpen()) {
+            return;
+        }
+        if (!$(e.target).closest('#sheld').length) {
+            return;
+        }
+        if ($('#curEditTextarea').length) {
+            // Don't swipe while in text edit mode
+            // the ios selection gestures get picked up
+            // as swipe gestures
             return;
         }
         var SwipeButR = $('.swipe_right:last');
@@ -901,7 +966,16 @@ export function initRossMods() {
         if (power_user.gestures === false) {
             return;
         }
-        if ($('.mes_edit_buttons, .drawer-content, #character_popup, #dialogue_popup, #WorldInfo, #right-nav-panel, #left-nav-panel, #select_chat_popup, #floatingPrompt').is(':visible')) {
+        if (Popup.util.isPopupOpen()) {
+            return;
+        }
+        if (!$(e.target).closest('#sheld').length) {
+            return;
+        }
+        if ($('#curEditTextarea').length) {
+            // Don't swipe while in text edit mode
+            // the ios selection gestures get picked up
+            // as swipe gestures
             return;
         }
         var SwipeButL = $('.swipe_left:last');
@@ -926,8 +1000,8 @@ export function initRossMods() {
         return false;
     }
 
-    $(document).on('keydown', function (event) {
-        processHotkeys(event.originalEvent);
+    $(document).on('keydown', async function (event) {
+        await processHotkeys(event.originalEvent);
     });
 
     const hotkeyTargets = {
@@ -939,7 +1013,12 @@ export function initRossMods() {
     /**
      * @param {KeyboardEvent} event
      */
-    function processHotkeys(event) {
+    async function processHotkeys(event) {
+        // Default hotkeys and shortcuts shouldn't work if any popup is currently open
+        if (Popup.util.isPopupOpen()) {
+            return;
+        }
+
         //Enter to send when send_textarea in focus
         if (document.activeElement == hotkeyTargets['send_textarea']) {
             const sendOnEnter = shouldSendOnEnter();
@@ -988,13 +1067,21 @@ export function initRossMods() {
         // Ctrl+Enter for Regeneration Last Response. If editing, accept the edits instead
         if (event.ctrlKey && event.key == 'Enter') {
             const editMesDone = $('.mes_edit_done:visible');
+            const reasoningMesDone = $('.mes_reasoning_edit_done:visible');
             if (editMesDone.length > 0) {
                 console.debug('Accepting edits with Ctrl+Enter');
+                $('#send_textarea').trigger('focus');
                 editMesDone.trigger('click');
                 return;
-            } else if (is_send_press == false) {
+            } else if (reasoningMesDone.length > 0) {
+                console.debug('Accepting edits with Ctrl+Enter');
+                $('#send_textarea').trigger('focus');
+                reasoningMesDone.trigger('click');
+                return;
+            }
+            else if (is_send_press == false) {
                 const skipConfirmKey = 'RegenerateWithCtrlEnter';
-                const skipConfirm = LoadLocalBool(skipConfirmKey);
+                const skipConfirm = accountStorage.getItem(skipConfirmKey) === 'true';
                 function doRegenerate() {
                     console.debug('Regenerating with Ctrl+Enter');
                     $('#option_regenerate').trigger('click');
@@ -1003,20 +1090,19 @@ export function initRossMods() {
                 if (skipConfirm) {
                     doRegenerate();
                 } else {
-                    const popupText = `
-                    <div class="marginBot10">Are you sure you want to regenerate the latest message?</div>
-                    <label class="checkbox_label justifyCenter" for="regenerateWithCtrlEnter">
-                        <input type="checkbox" id="regenerateWithCtrlEnter">
-                        Don't ask again
-                    </label>`;
-                    callPopup(popupText, 'confirm').then(result => {
-                        if (!result) {
-                            return;
-                        }
-                        const regenerateWithCtrlEnter = $('#regenerateWithCtrlEnter').prop('checked');
-                        SaveLocal(skipConfirmKey, regenerateWithCtrlEnter);
-                        doRegenerate();
+                    let regenerateWithCtrlEnter = false;
+                    const result = await Popup.show.confirm('Regenerate Message', 'Are you sure you want to regenerate the latest message?', {
+                        customInputs: [{ id: 'regenerateWithCtrlEnter', label: 'Don\'t ask again' }],
+                        onClose: (popup) => {
+                            regenerateWithCtrlEnter = popup.inputResults.get('regenerateWithCtrlEnter') ?? false;
+                        },
                     });
+                    if (!result) {
+                        return;
+                    }
+
+                    accountStorage.setItem(skipConfirmKey, String(regenerateWithCtrlEnter));
+                    doRegenerate();
                 }
                 return;
             } else {
@@ -1096,7 +1182,6 @@ export function initRossMods() {
         }
 
         if (event.key == 'Escape') { //closes various panels
-
             //dont override Escape hotkey functions from script.js
             //"close edit box" and "cancel stream generation".
             if ($('#curEditTextarea').is(':visible') || $('#mes_stop').is(':visible')) {

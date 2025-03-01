@@ -13,6 +13,7 @@ import { isValidUrl } from './utils.js';
  * @property {string} description
  * @property {string} iconClass
  * @property {boolean} iconAvailable
+ * @property {() => Promise<void>} [init=null]
  * @property {() => Promise<boolean>} isAvailable
  * @property {() => Promise<File[]>} scrape
  */
@@ -36,10 +37,14 @@ export class ScraperManager {
      * Register a scraper to be used by the Data Bank.
      * @param {Scraper} scraper Instance of a scraper to register
      */
-    static registerDataBankScraper(scraper) {
+    static async registerDataBankScraper(scraper) {
         if (ScraperManager.#scrapers.some(s => s.id === scraper.id)) {
             console.warn(`Scraper with ID ${scraper.id} already registered`);
             return;
+        }
+
+        if (scraper.init) {
+            await scraper.init();
         }
 
         ScraperManager.#scrapers.push(scraper);
@@ -185,7 +190,7 @@ class WebScraper {
         const files = [];
 
         for (const link of links) {
-            const result = await fetch('/api/serpapi/visit', {
+            const result = await fetch('/api/search/visit', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 body: JSON.stringify({ url: link }),
@@ -433,6 +438,24 @@ class FandomScraper {
     }
 }
 
+const iso6391Codes = [
+    'aa', 'ab', 'ae', 'af', 'ak', 'am', 'an', 'ar', 'as', 'av', 'ay', 'az',
+    'ba', 'be', 'bg', 'bh', 'bi', 'bm', 'bn', 'bo', 'br', 'bs', 'ca', 'ce',
+    'ch', 'co', 'cr', 'cs', 'cu', 'cv', 'cy', 'da', 'de', 'dv', 'dz', 'ee',
+    'el', 'en', 'eo', 'es', 'et', 'eu', 'fa', 'ff', 'fi', 'fj', 'fo', 'fr',
+    'fy', 'ga', 'gd', 'gl', 'gn', 'gu', 'gv', 'ha', 'he', 'hi', 'ho', 'hr',
+    'ht', 'hu', 'hy', 'hz', 'ia', 'id', 'ie', 'ig', 'ii', 'ik', 'io', 'is',
+    'it', 'iu', 'ja', 'jv', 'ka', 'kg', 'ki', 'kj', 'kk', 'kl', 'km', 'kn',
+    'ko', 'kr', 'ks', 'ku', 'kv', 'kw', 'ky', 'la', 'lb', 'lg', 'li', 'ln',
+    'lo', 'lt', 'lu', 'lv', 'mg', 'mh', 'mi', 'mk', 'ml', 'mn', 'mr', 'ms',
+    'mt', 'my', 'na', 'nb', 'nd', 'ne', 'ng', 'nl', 'nn', 'no', 'nr', 'nv',
+    'ny', 'oc', 'oj', 'om', 'or', 'os', 'pa', 'pi', 'pl', 'ps', 'pt', 'qu',
+    'rm', 'rn', 'ro', 'ru', 'rw', 'sa', 'sc', 'sd', 'se', 'sg', 'si', 'sk',
+    'sl', 'sm', 'sn', 'so', 'sq', 'sr', 'ss', 'st', 'su', 'sv', 'sw', 'ta',
+    'te', 'tg', 'th', 'ti', 'tk', 'tl', 'tn', 'to', 'tr', 'ts', 'tt', 'tw',
+    'ty', 'ug', 'uk', 'ur', 'uz', 've', 'vi', 'vo', 'wa', 'wo', 'xh', 'yi',
+    'yo', 'za', 'zh', 'zu'];
+
 /**
  * Scrape transcript from a YouTube video.
  * @implements {Scraper}
@@ -444,7 +467,9 @@ class YouTubeScraper {
         this.description = 'Download a transcript from a YouTube video.';
         this.iconClass = 'fa-brands fa-youtube';
         this.iconAvailable = true;
+    }
 
+    async init() {
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
             name: 'yt-script',
             callback: async (args, url) => {
@@ -464,7 +489,7 @@ class YouTubeScraper {
             helpString: 'Scrape a transcript from a YouTube video by ID or URL.',
             returns: ARGUMENT_TYPE.STRING,
             namedArgumentList: [
-                new SlashCommandNamedArgument('lang', 'ISO 639-1 language code of the transcript, e.g. "en"', ARGUMENT_TYPE.STRING, false, false, ''),
+                new SlashCommandNamedArgument('lang', 'ISO 639-1 language code of the transcript, e.g. "en"', ARGUMENT_TYPE.STRING, false, false, '', iso6391Codes),
             ],
             unnamedArgumentList: [
                 new SlashCommandArgument('URL or ID of the YouTube video', ARGUMENT_TYPE.STRING, true, false),
@@ -514,7 +539,7 @@ class YouTubeScraper {
         }
 
         const toast = toastr.info('Working, please wait...');
-        const { transcript, id } = await this.getScript(videoUrl, lang);
+        const { transcript, id } = await this.getScript(String(videoUrl), lang);
         toastr.clear(toast);
 
         const file = new File([transcript], `YouTube - ${id} - ${Date.now()}.txt`, { type: 'text/plain' });
@@ -530,7 +555,7 @@ class YouTubeScraper {
     async getScript(videoUrl, lang) {
         const id = this.parseId(String(videoUrl).trim());
 
-        const result = await fetch('/api/serpapi/transcript', {
+        const result = await fetch('/api/search/transcript', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({ id, lang }),
@@ -546,9 +571,11 @@ class YouTubeScraper {
     }
 }
 
-ScraperManager.registerDataBankScraper(new FileScraper());
-ScraperManager.registerDataBankScraper(new Notepad());
-ScraperManager.registerDataBankScraper(new WebScraper());
-ScraperManager.registerDataBankScraper(new MediaWikiScraper());
-ScraperManager.registerDataBankScraper(new FandomScraper());
-ScraperManager.registerDataBankScraper(new YouTubeScraper());
+export async function initScrapers() {
+    await ScraperManager.registerDataBankScraper(new FileScraper());
+    await ScraperManager.registerDataBankScraper(new Notepad());
+    await ScraperManager.registerDataBankScraper(new WebScraper());
+    await ScraperManager.registerDataBankScraper(new MediaWikiScraper());
+    await ScraperManager.registerDataBankScraper(new FandomScraper());
+    await ScraperManager.registerDataBankScraper(new YouTubeScraper());
+}
